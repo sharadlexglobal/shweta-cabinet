@@ -7,6 +7,7 @@ const scrim = document.getElementById('scrim');
 const memorySection = document.getElementById('memory-results');
 const memoryList = document.getElementById('memory-list');
 const tagBar = document.getElementById('tag-bar');
+const busy = document.getElementById('busy');
 
 let knownTags = [];
 let activeTagId = null;
@@ -377,15 +378,29 @@ function updateEmptyState(fileCount, memoryCount) {
 
 /* ---------- loading and searching ---------- */
 
+// The full list and a search can be in flight together, and on a sleepy
+// connection the older one can answer last. Only the newest request is allowed
+// to paint, otherwise a stale reply wipes out the results she just asked for.
+let latestRequest = 0;
+
 async function refresh() {
   const q = searchInput.value.trim();
+  const ticket = ++latestRequest;
   try {
     const params = new URLSearchParams();
     if (q) params.set('q', q);
     if (activeTagId) params.set('tag', activeTagId);
     const url = q ? `/api/search?${params}` : `/api/files${params.toString() ? '?' + params : ''}`;
 
+    // The free server naps, so the first call of the day can take a while.
+    const slowNotice = setTimeout(() => {
+      if (ticket === latestRequest) busy.classList.remove('hidden');
+    }, 400);
+
     const data = await (await fetch(url)).json();
+    clearTimeout(slowNotice);
+    if (ticket !== latestRequest) return;
+    busy.classList.add('hidden');
     if (data.error) throw new Error(data.error);
 
     if (Array.isArray(data.tags)) {
@@ -399,6 +414,8 @@ async function refresh() {
     renderMemories(data.memories || []);
     updateEmptyState((data.files || []).length, (data.memories || []).length);
   } catch (err) {
+    if (ticket !== latestRequest) return;
+    busy.classList.add('hidden');
     console.error(err);
     showToast('Could not load. Please try again.');
   }
@@ -791,6 +808,7 @@ wireSaveButton('memory-save', async () => {
 /* ---------- voice recording ---------- */
 
 const voiceButton = document.getElementById('voice-button');
+const voiceLabel = document.getElementById('voice-label');
 const voiceTimer = document.getElementById('voice-timer');
 const voiceHint = document.getElementById('voice-hint');
 const voiceSave = document.getElementById('voice-save');
@@ -808,50 +826,95 @@ function tickTimer() {
   voiceTimer.textContent = `${mm}:${ss}`;
 }
 
-function pickAudioType() {
-  const candidates = ['audio/webm', 'audio/mp4', 'audio/ogg'];
-  return candidates.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+// Phones disagree about audio formats, so try each until one is accepted.
+function makeRecorder(stream) {
+  const candidates = ['audio/mp4', 'audio/webm', 'audio/ogg'];
+  for (const mimeType of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported && !MediaRecorder.isTypeSupported(mimeType)) continue;
+      return new MediaRecorder(stream, { mimeType });
+    } catch (err) {
+      /* try the next one */
+    }
+  }
+  return new MediaRecorder(stream);
+}
+
+function setRecordingUi(on) {
+  voiceButton.classList.toggle('recording', on);
+  voiceButton.setAttribute('aria-label', on ? 'Stop recording' : 'Start recording');
+  voiceButton.innerHTML = on
+    ? '<svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg>'
+    : '<svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  voiceLabel.textContent = on ? 'Stop' : 'Record';
 }
 
 async function startRecording() {
   if (!navigator.mediaDevices || !window.MediaRecorder) {
-    voiceHint.textContent = 'This phone cannot record here. You can upload an audio file instead.';
+    voiceHint.textContent = 'This phone cannot record inside the app. Use "Record on my phone instead" below.';
     return;
   }
+
+  let stream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mimeType = pickAudioType();
-    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    voiceHint.textContent = err && err.name === 'NotAllowedError'
+      ? 'Microphone permission was refused. Allow it in your phone settings, or use "Record on my phone instead" below.'
+      : 'The microphone could not be opened. Use "Record on my phone instead" below.';
+    return;
+  }
+
+  try {
+    // Kept in a local name: the shared one is cleared the moment we stop, but
+    // the finished audio only arrives afterwards and still needs this handle.
+    const rec = makeRecorder(stream);
+    recorder = rec;
     recordedChunks = [];
     recordedBlob = null;
-    recorder.ondataavailable = (e) => { if (e.data.size) recordedChunks.push(e.data); };
-    recorder.onstop = () => {
+
+    const finish = () => {
       stream.getTracks().forEach((t) => t.stop());
-      if (recordedChunks.length) {
-        recordedBlob = new Blob(recordedChunks, { type: recorder.mimeType || 'audio/webm' });
-        voiceSave.disabled = false;
-        voiceHint.textContent = 'Ready to save. Tap the mic to record again.';
+      if (!recordedChunks.length) {
+        voiceHint.textContent = 'Nothing was recorded. Please try once more.';
+        voiceTimer.textContent = 'Tap to start';
+        return;
       }
+      recordedBlob = new Blob(recordedChunks, { type: rec.mimeType || 'audio/webm' });
+      voiceSave.disabled = false;
+      voiceHint.textContent = 'Ready to save. Tap Record to do it again.';
     };
-    recorder.start();
+
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) recordedChunks.push(e.data); };
+    rec.onstop = finish;
+    rec.onerror = () => {
+      voiceHint.textContent = 'The recording stopped unexpectedly. Please try again.';
+    };
+
+    // Ask for the audio in pieces so nothing depends on one final delivery.
+    rec.start(1000);
     recordStartedAt = Date.now();
     tickTimer();
     recordTimer = setInterval(tickTimer, 500);
-    voiceButton.classList.add('recording');
-    voiceButton.setAttribute('aria-label', 'Stop recording');
-    voiceHint.textContent = 'Recording... tap again to stop.';
+    setRecordingUi(true);
+    voiceHint.textContent = 'Recording. Tap the square to stop.';
     voiceSave.disabled = true;
   } catch (err) {
-    voiceHint.textContent = 'Microphone permission was not given. Please allow it in your phone settings.';
+    console.error('Recorder failed', err);
+    stream.getTracks().forEach((t) => t.stop());
+    voiceHint.textContent = 'This phone would not start recording. Use "Record on my phone instead" below.';
   }
 }
 
 function stopRecording(discard = false) {
   clearInterval(recordTimer);
-  voiceButton.classList.remove('recording');
-  voiceButton.setAttribute('aria-label', 'Start recording');
-  if (recorder && recorder.state === 'recording') recorder.stop();
+  setRecordingUi(false);
+  const rec = recorder;
   recorder = null;
+  if (rec && rec.state === 'recording') {
+    if (discard) rec.onstop = null;
+    try { rec.stop(); } catch (err) { /* already stopped */ }
+  }
   if (discard) {
     recordedChunks = [];
     recordedBlob = null;
@@ -864,6 +927,18 @@ function stopRecording(discard = false) {
 voiceButton.addEventListener('click', () => {
   if (recorder && recorder.state === 'recording') stopRecording();
   else startRecording();
+});
+
+// Always available: the phone's own recorder, for anything the browser refuses.
+document.getElementById('voice-fallback').addEventListener('click', () => {
+  document.getElementById('audio-input').click();
+});
+document.getElementById('audio-input').addEventListener('change', (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!files.length) return;
+  closeSheet();
+  setTimeout(() => askForDetails(files, { isVoiceNote: true }), 200);
 });
 
 voiceSave.addEventListener('click', () => {

@@ -38,6 +38,7 @@
   <div id="tag-bar" class="tag-bar hidden"></div>
 
   <main id="content">
+    <div id="busy" class="busy hidden"><span class="busy-dot"></span>Searching...</div>
     <div id="transfers" class="transfers"></div>
 
     <section id="memory-results" class="memory-results hidden">
@@ -215,14 +216,18 @@
     <button id="voice-button" class="voice-button" aria-label="Start recording">
       <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     </button>
+    <div id="voice-label" class="voice-label">Record</div>
     <div id="voice-timer" class="voice-timer">Tap to start</div>
     <div id="voice-hint" class="voice-hint">Your phone will ask for microphone permission the first time.</div>
+    <button id="voice-fallback" class="voice-fallback">Record on my phone instead</button>
   </div>
   <div class="sheet-actions">
     <button class="btn btn-quiet" data-close>Cancel</button>
     <button id="voice-save" class="btn btn-primary" disabled>Save recording</button>
   </div>
 </div>
+
+<input id="audio-input" type="file" accept="audio/*" capture hidden />
 
 <script src="/app.js"></script>
 </body>
