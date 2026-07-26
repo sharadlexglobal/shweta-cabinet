@@ -160,9 +160,22 @@ async function createMemory({ name, content }) {
   });
 }
 
+// Memory search hands back every memory every time, with the near-misses
+// sitting on a flat baseline score. A real match scores several times higher,
+// so anything close to that baseline is dropped rather than shown as a result.
+const MEMORY_MATCH_FLOOR = 15;
+
 async function searchMemories(query) {
   const data = await fabricFetch(`/v2/memories/search?query=${encodeURIComponent(query)}`);
-  return data.hits || [];
+  const hits = data.hits || [];
+  if (!hits.length) return [];
+
+  const lowest = Math.min(...hits.map((h) => h.score || 0));
+  return hits.filter((h) => {
+    const score = h.score || 0;
+    if (score < MEMORY_MATCH_FLOOR) return false;
+    return hits.length === 1 || score >= lowest * 1.5;
+  });
 }
 
 /* ---------- listing, tags, search ---------- */
