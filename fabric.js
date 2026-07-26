@@ -200,6 +200,32 @@ async function listByTag(parentId, tagId) {
   return resources;
 }
 
+async function getResource(resourceId) {
+  return fabricFetch(`/v2/resources/${resourceId}`);
+}
+
+// Always archive rather than erase: Fabric deletes for good by default, and a
+// tap in this app must never be the last word on somebody's document.
+async function removeResource(resourceId, parentId) {
+  const resource = await getResource(resourceId);
+  const belongsHere = (resource.parent && resource.parent.id === parentId)
+    || (resource.root && resource.root.id === parentId);
+  if (!belongsHere) throw new Error('That item does not belong to this cabinet');
+
+  await fabricFetch('/v2/resources/delete', {
+    method: 'POST',
+    body: JSON.stringify({ resourceIds: [resourceId], archive: true }),
+  });
+  return resource;
+}
+
+async function restoreResource(resourceId) {
+  await fabricFetch('/v2/resources/recover', {
+    method: 'POST',
+    body: JSON.stringify({ resourceIds: [resourceId] }),
+  });
+}
+
 async function search(query, parentId, tagId) {
   const filters = { parentIds: [parentId] };
   if (tagId) filters.tagIds = [tagId];
@@ -235,4 +261,7 @@ module.exports = {
   listFolderTags,
   listByTag,
   search,
+  getResource,
+  removeResource,
+  restoreResource,
 };

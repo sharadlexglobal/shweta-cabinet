@@ -151,6 +151,31 @@ app.post('/api/links', async (req, res) => {
   }
 });
 
+// Removal only ever moves the item to Fabric's trash, so "Undo" can bring it
+// straight back and nothing is lost to a mistaken tap.
+app.post('/api/delete', async (req, res) => {
+  const { id } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'Nothing to remove' });
+  try {
+    const folderId = await fabric.ensureFolder(FOLDER_NAME);
+    const removed = await fabric.removeResource(id, folderId);
+    res.json({ removed: { id: removed.id, name: removed.name } });
+  } catch (err) {
+    fail(res, err, 'Could not remove that');
+  }
+});
+
+app.post('/api/restore', async (req, res) => {
+  const { id } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'Nothing to bring back' });
+  try {
+    await fabric.restoreResource(id);
+    res.json({ ok: true });
+  } catch (err) {
+    fail(res, err, 'Could not bring it back');
+  }
+});
+
 app.post('/api/memories', async (req, res) => {
   const { text, title } = req.body || {};
   if (!text || text.trim().length < 5) {

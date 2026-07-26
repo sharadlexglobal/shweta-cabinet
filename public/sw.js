@@ -1,4 +1,4 @@
-const CACHE = 'shweta-cabinet-v3';
+const CACHE = 'shweta-cabinet-v4';
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

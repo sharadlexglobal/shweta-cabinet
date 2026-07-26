@@ -15,11 +15,24 @@ let lastFiles = [];
 /* ---------- small helpers ---------- */
 
 let toastTimer;
-function showToast(msg) {
-  toast.textContent = msg;
+function showToast(msg, action) {
+  toast.innerHTML = '';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  toast.appendChild(text);
+  if (action) {
+    const button = document.createElement('button');
+    button.className = 'toast-action';
+    button.textContent = action.label;
+    button.addEventListener('click', () => {
+      toast.classList.add('hidden');
+      action.run();
+    });
+    toast.appendChild(button);
+  }
   toast.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.add('hidden'), 3000);
+  toastTimer = setTimeout(() => toast.classList.add('hidden'), action ? 7000 : 3000);
 }
 
 function formatDate(iso) {
@@ -244,7 +257,7 @@ function renderTagBar() {
 /* ---------- rendering the grid ---------- */
 
 const ICONS = {
-  pdf: '<path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.6 17v-3.4h.9c.6 0 1 .5 1 1.1v1.2c0 .6-.4 1.1-1 1.1h-.9Zm3.6 0v-3.4h1.5M12.2 15.2h1.2m2.1 1.8v-3.4h1.5" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  pdf: '<path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><text x="12" y="17.4" text-anchor="middle" font-family="Inter, sans-serif" font-size="5.4" font-weight="700" fill="currentColor" stroke="none">PDF</text>',
   document: '<path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 3v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9 13h6M9 16h6M9 10h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
   notepad: '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3h11A1.5 1.5 0 0 1 19 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5v-15Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.5 8h7M8.5 12h7M8.5 16h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   bookmark: '<path d="M10 13.5a4 4 0 0 0 5.7.4l2.6-2.4a4 4 0 0 0-5.4-5.9l-1.5 1.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M14 10.5a4 4 0 0 0-5.7-.4l-2.6 2.4a4 4 0 0 0 5.4 5.9l1.5-1.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
@@ -405,28 +418,66 @@ const viewerName = document.getElementById('viewer-name');
 const viewerMeta = document.getElementById('viewer-meta');
 const viewerDownload = document.getElementById('viewer-download');
 
+const viewerConfirm = document.getElementById('viewer-confirm');
+let viewingFile = null;
+
 function closeViewer() {
   viewer.classList.add('hidden');
   viewerBody.innerHTML = '';
+  viewerConfirm.classList.add('hidden');
+  viewingFile = null;
   document.body.classList.remove('locked');
 }
 
 document.getElementById('viewer-close').addEventListener('click', closeViewer);
 
-async function openViewer(file) {
-  // A saved link belongs on the real website, not inside a preview.
-  if (file.kind === 'bookmark' && file.originUrl) {
-    window.open(file.originUrl, '_blank', 'noopener');
-    return;
+document.getElementById('viewer-delete').addEventListener('click', () => {
+  viewerConfirm.classList.remove('hidden');
+});
+document.getElementById('confirm-cancel').addEventListener('click', () => {
+  viewerConfirm.classList.add('hidden');
+});
+document.getElementById('confirm-remove').addEventListener('click', async () => {
+  const file = viewingFile;
+  if (!file) return;
+  const button = document.getElementById('confirm-remove');
+  button.disabled = true;
+  button.textContent = 'Removing...';
+  try {
+    await postJson('/api/delete', { id: file.id });
+    closeViewer();
+    refresh();
+    showToast(`Removed ${displayName(file)}`, {
+      label: 'Undo',
+      run: async () => {
+        try {
+          await postJson('/api/restore', { id: file.id });
+          showToast('Brought it back');
+          refresh();
+        } catch (err) {
+          showToast('Could not bring it back');
+        }
+      },
+    });
+  } catch (err) {
+    showToast(err.message || 'Could not remove that');
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Remove';
   }
+});
 
+async function openViewer(file) {
+  viewingFile = file;
+  viewerConfirm.classList.add('hidden');
   viewerName.textContent = displayName(file);
   viewerBody.innerHTML = '<div class="viewer-loading">Opening...</div>';
   viewer.classList.remove('hidden');
   document.body.classList.add('locked');
 
-  viewerDownload.classList.toggle('hidden', !file.fileUrl);
-  if (file.fileUrl) viewerDownload.href = file.fileUrl;
+  const openTarget = file.kind === 'bookmark' ? file.originUrl : file.fileUrl;
+  viewerDownload.classList.toggle('hidden', !openTarget);
+  if (openTarget) viewerDownload.href = openTarget;
 
   const bits = [];
   if (file.description) bits.push(file.description);
@@ -450,7 +501,29 @@ async function openViewer(file) {
   }
 
   try {
-    if (file.kind === 'image' && file.fileUrl) {
+    if (file.kind === 'bookmark') {
+      viewerBody.innerHTML = '';
+      const box = document.createElement('div');
+      box.className = 'viewer-link';
+      const preview = bestThumbUrl(file);
+      if (preview) {
+        const img = document.createElement('img');
+        img.src = preview;
+        img.alt = displayName(file);
+        box.appendChild(img);
+      }
+      const host = document.createElement('p');
+      host.className = 'viewer-link-host';
+      host.textContent = hostOf(file.originUrl) || '';
+      const go = document.createElement('a');
+      go.className = 'btn btn-primary viewer-link-go';
+      go.href = file.originUrl;
+      go.target = '_blank';
+      go.rel = 'noopener';
+      go.textContent = 'Open website';
+      box.append(host, go);
+      viewerBody.appendChild(box);
+    } else if (file.kind === 'image' && file.fileUrl) {
       viewerBody.innerHTML = '';
       const img = document.createElement('img');
       img.className = 'viewer-image';
