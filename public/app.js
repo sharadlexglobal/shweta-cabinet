@@ -21,6 +21,15 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
+function hostOf(url) {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
+
 function formatSize(bytes) {
   if (!bytes) return '';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -169,11 +178,15 @@ function renderFiles(files) {
 
     const name = document.createElement('div');
     name.className = 'file-name';
-    name.textContent = file.name || 'Untitled';
+    // Some sites hide their title, so fall back to the address itself.
+    name.textContent = file.name || hostOf(file.originUrl) || 'Untitled';
 
     const meta = document.createElement('div');
     meta.className = 'file-meta';
-    meta.textContent = formatDate(file.createdAt);
+    const host = file.kind === 'bookmark' ? hostOf(file.originUrl) : null;
+    meta.textContent = host && host !== name.textContent
+      ? `${host} · ${formatDate(file.createdAt)}`
+      : formatDate(file.createdAt);
 
     a.append(thumb, name, meta);
     grid.appendChild(a);
