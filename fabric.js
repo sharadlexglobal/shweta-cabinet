@@ -50,22 +50,24 @@ async function ensureFolder(name) {
   return cachedFolderId;
 }
 
-async function uploadFile({ buffer, filename, mimeType, parentId }) {
-  const presign = await fabricFetch(
-    `/v2/upload?filename=${encodeURIComponent(filename)}&size=${buffer.length}`
-  );
+// Storage path Fabric hands back inside a presigned URL. The browser PUTs the
+// bytes straight to that URL, then asks us to register the file, so we check the
+// shape of the path we're given before trusting it.
+const STORAGE_PATH = /^workspace\/[0-9a-f-]{36}\/resource\/[0-9a-f-]{36}\/v0\/[^/]+$/i;
 
-  const putRes = await fetch(presign.url, {
-    method: 'PUT',
+async function presignUpload(filename, size) {
+  const query = new URLSearchParams({ filename });
+  if (Number.isFinite(size)) query.set('size', String(size));
+  const presign = await fabricFetch(`/v2/upload?${query}`);
+  return {
+    url: presign.url,
     headers: presign.headers,
-    body: buffer,
-  });
-  if (!putRes.ok) {
-    throw new Error(`Upload PUT failed: ${putRes.status}`);
-  }
+    path: new URL(presign.url).pathname.replace(/^\//, ''),
+  };
+}
 
-  const path = new URL(presign.url).pathname.replace(/^\//, '');
-
+async function registerFile({ path, filename, mimeType, parentId, isVoiceNote }) {
+  if (!STORAGE_PATH.test(path)) throw new Error('Unexpected storage path');
   return fabricFetch('/v2/files', {
     method: 'POST',
     body: JSON.stringify({
@@ -73,8 +75,47 @@ async function uploadFile({ buffer, filename, mimeType, parentId }) {
       parentId,
       mimeType: mimeType || 'application/octet-stream',
       attachment: { path, filename },
+      ...(isVoiceNote ? { metadata: { voiceNote: true } } : {}),
     }),
   });
+}
+
+// Server-side upload, used as a fallback when the browser cannot PUT directly.
+async function uploadFile({ buffer, filename, mimeType, parentId, isVoiceNote }) {
+  const presign = await presignUpload(filename, buffer.length);
+  const putRes = await fetch(presign.url, {
+    method: 'PUT',
+    headers: presign.headers,
+    body: buffer,
+  });
+  if (!putRes.ok) throw new Error(`Upload PUT failed: ${putRes.status}`);
+  return registerFile({ path: presign.path, filename, mimeType, parentId, isVoiceNote });
+}
+
+async function createNote({ name, text, parentId }) {
+  return fabricFetch('/v2/notepads', {
+    method: 'POST',
+    body: JSON.stringify({ name, parentId, text }),
+  });
+}
+
+async function createBookmark({ url, parentId }) {
+  return fabricFetch('/v2/bookmarks', {
+    method: 'POST',
+    body: JSON.stringify({ url, parentId }),
+  });
+}
+
+async function createMemory({ name, content }) {
+  return fabricFetch('/v2/memories', {
+    method: 'POST',
+    body: JSON.stringify({ source: 'text', content, ...(name ? { name } : {}) }),
+  });
+}
+
+async function searchMemories(query) {
+  const data = await fabricFetch(`/v2/memories/search?query=${encodeURIComponent(query)}`);
+  return data.hits || [];
 }
 
 async function listRecent(parentId, limit = 60) {
@@ -105,4 +146,15 @@ async function search(query, parentId) {
   return Array.from(merged.values());
 }
 
-module.exports = { ensureFolder, uploadFile, listRecent, search };
+module.exports = {
+  ensureFolder,
+  presignUpload,
+  registerFile,
+  uploadFile,
+  createNote,
+  createBookmark,
+  createMemory,
+  searchMemories,
+  listRecent,
+  search,
+};

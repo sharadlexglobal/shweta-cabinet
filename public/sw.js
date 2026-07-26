@@ -1,4 +1,4 @@
-const CACHE = 'shweta-cabinet-v1';
+const CACHE = 'shweta-cabinet-v2';
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
@@ -15,10 +15,18 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Always prefer the network so a new version reaches the phone straight away;
+// the cache is only there to keep the app opening when the signal drops.
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET' || request.url.includes('/api/')) return;
   event.respondWith(
-    caches.match(request).then((cached) => cached || fetch(request).catch(() => cached))
+    fetch(request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => {});
+        return response;
+      })
+      .catch(() => caches.match(request))
   );
 });
