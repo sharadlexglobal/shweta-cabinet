@@ -20,7 +20,10 @@ async function fabricFetch(path, options = {}) {
     throw new Error(`Fabric ${options.method || 'GET'} ${path} failed: ${res.status} ${text}`);
   }
   if (res.status === 204) return null;
-  return res.json();
+  // Fabric answers with application/hal+json, so match on "json" broadly.
+  // Notepad content comes back as plain text.
+  const type = res.headers.get('content-type') || '';
+  return type.includes('json') ? res.json() : res.text();
 }
 
 let cachedFolderId = process.env.FABRIC_FOLDER_ID || null;
@@ -50,6 +53,29 @@ async function ensureFolder(name) {
   return cachedFolderId;
 }
 
+function tagPayload(tags) {
+  if (!Array.isArray(tags)) return undefined;
+  const names = tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 12);
+  return names.length ? names.map((name) => ({ name: name.slice(0, 255) })) : undefined;
+}
+
+// Descriptions are not accepted while creating a resource, so they are applied
+// straight afterwards. A failure here must not lose the thing she just saved.
+async function applyDescription(resourceId, description) {
+  const text = (description || '').trim();
+  if (!text) return;
+  try {
+    await fabricFetch(`/v2/resources/${resourceId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ description: text.slice(0, 2000) }),
+    });
+  } catch (err) {
+    console.error('Could not attach the description', err);
+  }
+}
+
+/* ---------- uploads ---------- */
+
 // Storage path Fabric hands back inside a presigned URL. The browser PUTs the
 // bytes straight to that URL, then asks us to register the file, so we check the
 // shape of the path we're given before trusting it.
@@ -66,22 +92,25 @@ async function presignUpload(filename, size) {
   };
 }
 
-async function registerFile({ path, filename, mimeType, parentId, isVoiceNote }) {
+async function registerFile({ path, filename, mimeType, parentId, isVoiceNote, tags, description }) {
   if (!STORAGE_PATH.test(path)) throw new Error('Unexpected storage path');
-  return fabricFetch('/v2/files', {
+  const file = await fabricFetch('/v2/files', {
     method: 'POST',
     body: JSON.stringify({
       name: filename,
       parentId,
       mimeType: mimeType || 'application/octet-stream',
       attachment: { path, filename },
+      ...(tagPayload(tags) ? { tags: tagPayload(tags) } : {}),
       ...(isVoiceNote ? { metadata: { voiceNote: true } } : {}),
     }),
   });
+  await applyDescription(file.id, description);
+  return file;
 }
 
 // Server-side upload, used as a fallback when the browser cannot PUT directly.
-async function uploadFile({ buffer, filename, mimeType, parentId, isVoiceNote }) {
+async function uploadFile({ buffer, filename, mimeType, parentId, isVoiceNote, tags, description }) {
   const presign = await presignUpload(filename, buffer.length);
   const putRes = await fetch(presign.url, {
     method: 'PUT',
@@ -89,21 +118,39 @@ async function uploadFile({ buffer, filename, mimeType, parentId, isVoiceNote })
     body: buffer,
   });
   if (!putRes.ok) throw new Error(`Upload PUT failed: ${putRes.status}`);
-  return registerFile({ path: presign.path, filename, mimeType, parentId, isVoiceNote });
-}
-
-async function createNote({ name, text, parentId }) {
-  return fabricFetch('/v2/notepads', {
-    method: 'POST',
-    body: JSON.stringify({ name, parentId, text }),
+  return registerFile({
+    path: presign.path, filename, mimeType, parentId, isVoiceNote, tags, description,
   });
 }
 
-async function createBookmark({ url, parentId }) {
-  return fabricFetch('/v2/bookmarks', {
+/* ---------- notes, links, memories ---------- */
+
+async function createNote({ name, text, parentId, tags, description }) {
+  const note = await fabricFetch('/v2/notepads', {
     method: 'POST',
-    body: JSON.stringify({ url, parentId }),
+    body: JSON.stringify({
+      name, parentId, text,
+      ...(tagPayload(tags) ? { tags: tagPayload(tags) } : {}),
+    }),
   });
+  await applyDescription(note.id, description);
+  return note;
+}
+
+async function getNoteContent(resourceId) {
+  return fabricFetch(`/v2/notepads/${resourceId}/content`);
+}
+
+async function createBookmark({ url, parentId, tags, description }) {
+  const bookmark = await fabricFetch('/v2/bookmarks', {
+    method: 'POST',
+    body: JSON.stringify({
+      url, parentId,
+      ...(tagPayload(tags) ? { tags: tagPayload(tags) } : {}),
+    }),
+  });
+  await applyDescription(bookmark.id, description);
+  return bookmark;
 }
 
 async function createMemory({ name, content }) {
@@ -118,7 +165,9 @@ async function searchMemories(query) {
   return data.hits || [];
 }
 
-async function listRecent(parentId, limit = 60) {
+/* ---------- listing, tags, search ---------- */
+
+async function listRecent(parentId, limit = 100) {
   const data = await fabricFetch('/v2/resources/filter', {
     method: 'POST',
     body: JSON.stringify({ parentId }),
@@ -128,15 +177,41 @@ async function listRecent(parentId, limit = 60) {
   return resources.slice(0, limit);
 }
 
-async function search(query, parentId) {
+// Only the tags actually used inside this folder. The workspace-wide tag list
+// would expose names from other people's work, which must never show up here.
+async function listFolderTags(parentId) {
+  const resources = await listRecent(parentId, 500);
+  const seen = new Map();
+  for (const r of resources) {
+    for (const tag of r.tags || []) {
+      if (tag && tag.id && !seen.has(tag.id)) seen.set(tag.id, { id: tag.id, name: tag.name });
+    }
+  }
+  return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function listByTag(parentId, tagId) {
+  const data = await fabricFetch('/v2/resources/filter', {
+    method: 'POST',
+    body: JSON.stringify({ parentId, tagIds: [tagId] }),
+  });
+  const resources = data.resources || [];
+  resources.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return resources;
+}
+
+async function search(query, parentId, tagId) {
+  const filters = { parentIds: [parentId] };
+  if (tagId) filters.tagIds = [tagId];
+
   const [semantic, byName] = await Promise.all([
     fabricFetch('/v2/search', {
       method: 'POST',
-      body: JSON.stringify({ text: query, filters: { parentIds: [parentId] } }),
+      body: JSON.stringify({ text: query, filters }),
     }).catch(() => ({ hits: [] })),
     fabricFetch('/v2/resources/filter', {
       method: 'POST',
-      body: JSON.stringify({ parentId, name: query }),
+      body: JSON.stringify({ parentId, name: query, ...(tagId ? { tagIds: [tagId] } : {}) }),
     }).catch(() => ({ resources: [] })),
   ]);
 
@@ -152,9 +227,12 @@ module.exports = {
   registerFile,
   uploadFile,
   createNote,
+  getNoteContent,
   createBookmark,
   createMemory,
   searchMemories,
   listRecent,
+  listFolderTags,
+  listByTag,
   search,
 };

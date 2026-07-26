@@ -6,6 +6,11 @@ const transfers = document.getElementById('transfers');
 const scrim = document.getElementById('scrim');
 const memorySection = document.getElementById('memory-results');
 const memoryList = document.getElementById('memory-list');
+const tagBar = document.getElementById('tag-bar');
+
+let knownTags = [];
+let activeTagId = null;
+let lastFiles = [];
 
 /* ---------- small helpers ---------- */
 
@@ -54,6 +59,7 @@ async function postJson(url, body) {
 
 const sheets = {
   add: document.getElementById('add-sheet'),
+  details: document.getElementById('details-sheet'),
   note: document.getElementById('note-sheet'),
   link: document.getElementById('link-sheet'),
   memory: document.getElementById('memory-sheet'),
@@ -96,7 +102,9 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-close]')) closeSheet();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeSheet();
+  if (e.key !== 'Escape') return;
+  if (!document.getElementById('viewer').classList.contains('hidden')) closeViewer();
+  else closeSheet();
 });
 
 document.getElementById('add-fab').addEventListener('click', () => showSheet('add'));
@@ -112,6 +120,126 @@ document.querySelectorAll('.option').forEach((btn) => {
     }, 180);
   });
 });
+
+/* ---------- label picker ---------- */
+
+// One picker per sheet: chosen labels as chips, free typing, and one-tap reuse
+// of labels already used in this cabinet.
+function createTagPicker(chosenEl, inputEl, suggestionsEl) {
+  let chosen = [];
+
+  function renderChosen() {
+    chosenEl.innerHTML = '';
+    chosen.forEach((name) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip chip-chosen';
+      chip.innerHTML = `<span></span><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`;
+      chip.querySelector('span').textContent = name;
+      chip.addEventListener('click', () => {
+        chosen = chosen.filter((n) => n !== name);
+        renderChosen();
+        renderSuggestions();
+      });
+      chosenEl.appendChild(chip);
+    });
+  }
+
+  function renderSuggestions() {
+    suggestionsEl.innerHTML = '';
+    knownTags
+      .filter((t) => !chosen.some((n) => n.toLowerCase() === t.name.toLowerCase()))
+      .slice(0, 10)
+      .forEach((t) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chip';
+        chip.textContent = t.name;
+        chip.addEventListener('click', () => add(t.name));
+        suggestionsEl.appendChild(chip);
+      });
+  }
+
+  function add(name) {
+    const clean = (name || '').trim();
+    if (!clean) return;
+    if (!chosen.some((n) => n.toLowerCase() === clean.toLowerCase())) chosen.push(clean);
+    inputEl.value = '';
+    renderChosen();
+    renderSuggestions();
+  }
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      add(inputEl.value);
+    } else if (e.key === 'Backspace' && !inputEl.value && chosen.length) {
+      chosen.pop();
+      renderChosen();
+      renderSuggestions();
+    }
+  });
+
+  return {
+    getTags() {
+      // Anything typed but not yet entered should still count.
+      const pending = inputEl.value.trim();
+      return pending && !chosen.some((n) => n.toLowerCase() === pending.toLowerCase())
+        ? [...chosen, pending]
+        : [...chosen];
+    },
+    reset() {
+      chosen = [];
+      inputEl.value = '';
+      renderChosen();
+      renderSuggestions();
+    },
+    refresh: renderSuggestions,
+  };
+}
+
+const detailsPicker = createTagPicker(
+  document.getElementById('details-chosen'),
+  document.getElementById('details-tag-input'),
+  document.getElementById('details-suggestions')
+);
+const notePicker = createTagPicker(
+  document.getElementById('note-chosen'),
+  document.getElementById('note-tag-input'),
+  document.getElementById('note-suggestions')
+);
+const linkPicker = createTagPicker(
+  document.getElementById('link-chosen'),
+  document.getElementById('link-tag-input'),
+  document.getElementById('link-suggestions')
+);
+
+/* ---------- the label bar under search ---------- */
+
+function renderTagBar() {
+  tagBar.innerHTML = '';
+  tagBar.classList.toggle('hidden', knownTags.length === 0);
+  if (!knownTags.length) return;
+
+  const all = document.createElement('button');
+  all.type = 'button';
+  all.className = 'chip' + (activeTagId ? '' : ' chip-active');
+  all.textContent = 'All';
+  all.addEventListener('click', () => { activeTagId = null; refresh(); });
+  tagBar.appendChild(all);
+
+  knownTags.forEach((t) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip' + (activeTagId === t.id ? ' chip-active' : '');
+    chip.textContent = t.name;
+    chip.addEventListener('click', () => {
+      activeTagId = activeTagId === t.id ? null : t.id;
+      refresh();
+    });
+    tagBar.appendChild(chip);
+  });
+}
 
 /* ---------- rendering the grid ---------- */
 
@@ -144,14 +272,17 @@ function bestThumbUrl(file) {
   return null;
 }
 
+function displayName(file) {
+  return file.name || hostOf(file.originUrl) || 'Untitled';
+}
+
 function renderFiles(files) {
+  lastFiles = files;
   grid.innerHTML = '';
   for (const file of files) {
-    const a = document.createElement('a');
-    a.className = 'file-card';
-    a.href = file.originUrl || file.url || '#';
-    a.target = '_blank';
-    a.rel = 'noopener';
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'file-card';
 
     const thumb = document.createElement('div');
     thumb.className = 'file-thumb';
@@ -159,7 +290,7 @@ function renderFiles(files) {
     if (thumbUrl) {
       const img = document.createElement('img');
       img.src = thumbUrl;
-      img.alt = file.name;
+      img.alt = displayName(file);
       img.loading = 'lazy';
       // Link previews are often pale logos, so they need a plain backdrop.
       thumb.classList.add('has-image');
@@ -178,8 +309,7 @@ function renderFiles(files) {
 
     const name = document.createElement('div');
     name.className = 'file-name';
-    // Some sites hide their title, so fall back to the address itself.
-    name.textContent = file.name || hostOf(file.originUrl) || 'Untitled';
+    name.textContent = displayName(file);
 
     const meta = document.createElement('div');
     meta.className = 'file-meta';
@@ -188,8 +318,22 @@ function renderFiles(files) {
       ? `${host} · ${formatDate(file.createdAt)}`
       : formatDate(file.createdAt);
 
-    a.append(thumb, name, meta);
-    grid.appendChild(a);
+    card.append(thumb, name, meta);
+
+    if ((file.tags || []).length) {
+      const row = document.createElement('div');
+      row.className = 'card-tags';
+      file.tags.slice(0, 3).forEach((t) => {
+        const s = document.createElement('span');
+        s.className = 'card-tag';
+        s.textContent = t.name;
+        row.appendChild(s);
+      });
+      card.appendChild(row);
+    }
+
+    card.addEventListener('click', () => openViewer(file));
+    grid.appendChild(card);
   }
 }
 
@@ -218,39 +362,146 @@ function updateEmptyState(fileCount, memoryCount) {
   emptyState.classList.toggle('hidden', fileCount > 0 || memoryCount > 0 || busy);
 }
 
-async function loadRecent() {
+/* ---------- loading and searching ---------- */
+
+async function refresh() {
+  const q = searchInput.value.trim();
   try {
-    const res = await fetch('/api/files');
-    const data = await res.json();
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (activeTagId) params.set('tag', activeTagId);
+    const url = q ? `/api/search?${params}` : `/api/files${params.toString() ? '?' + params : ''}`;
+
+    const data = await (await fetch(url)).json();
     if (data.error) throw new Error(data.error);
+
+    if (Array.isArray(data.tags)) {
+      knownTags = data.tags;
+      renderTagBar();
+      detailsPicker.refresh();
+      notePicker.refresh();
+      linkPicker.refresh();
+    }
     renderFiles(data.files || []);
-    renderMemories([]);
-    updateEmptyState((data.files || []).length, 0);
+    renderMemories(data.memories || []);
+    updateEmptyState((data.files || []).length, (data.memories || []).length);
   } catch (err) {
-    showToast('Could not load your files. Pull down to try again.');
+    console.error(err);
+    showToast('Could not load. Please try again.');
   }
 }
-
-/* ---------- search ---------- */
 
 let searchDebounce;
 searchInput.addEventListener('input', () => {
   clearTimeout(searchDebounce);
-  const q = searchInput.value.trim();
-  searchDebounce = setTimeout(async () => {
-    if (!q) return loadRecent();
-    try {
-      const res = await fetch('/api/search?q=' + encodeURIComponent(q));
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      renderFiles(data.files || []);
-      renderMemories(data.memories || []);
-      updateEmptyState((data.files || []).length, (data.memories || []).length);
-    } catch (err) {
-      showToast('Search did not work. Please try again.');
-    }
-  }, 320);
+  searchDebounce = setTimeout(refresh, 320);
 });
+
+/* ---------- viewer ---------- */
+
+const viewer = document.getElementById('viewer');
+const viewerBody = document.getElementById('viewer-body');
+const viewerName = document.getElementById('viewer-name');
+const viewerMeta = document.getElementById('viewer-meta');
+const viewerDownload = document.getElementById('viewer-download');
+
+function closeViewer() {
+  viewer.classList.add('hidden');
+  viewerBody.innerHTML = '';
+  document.body.classList.remove('locked');
+}
+
+document.getElementById('viewer-close').addEventListener('click', closeViewer);
+
+async function openViewer(file) {
+  // A saved link belongs on the real website, not inside a preview.
+  if (file.kind === 'bookmark' && file.originUrl) {
+    window.open(file.originUrl, '_blank', 'noopener');
+    return;
+  }
+
+  viewerName.textContent = displayName(file);
+  viewerBody.innerHTML = '<div class="viewer-loading">Opening...</div>';
+  viewer.classList.remove('hidden');
+  document.body.classList.add('locked');
+
+  viewerDownload.classList.toggle('hidden', !file.fileUrl);
+  if (file.fileUrl) viewerDownload.href = file.fileUrl;
+
+  const bits = [];
+  if (file.description) bits.push(file.description);
+  if (file.size) bits.push(formatSize(file.size));
+  bits.push(formatDate(file.createdAt));
+  viewerMeta.innerHTML = '';
+  const line = document.createElement('div');
+  line.className = 'viewer-meta-line';
+  line.textContent = bits.join(' · ');
+  viewerMeta.appendChild(line);
+  if ((file.tags || []).length) {
+    const row = document.createElement('div');
+    row.className = 'chip-row';
+    file.tags.forEach((t) => {
+      const s = document.createElement('span');
+      s.className = 'chip chip-static';
+      s.textContent = t.name;
+      row.appendChild(s);
+    });
+    viewerMeta.appendChild(row);
+  }
+
+  try {
+    if (file.kind === 'image' && file.fileUrl) {
+      viewerBody.innerHTML = '';
+      const img = document.createElement('img');
+      img.className = 'viewer-image';
+      img.src = (file.thumbnail && file.thumbnail.xl) || file.fileUrl;
+      img.alt = displayName(file);
+      viewerBody.appendChild(img);
+    } else if (file.kind === 'notepad') {
+      const data = await (await fetch(`/api/notes/${file.id}/content`)).json();
+      viewerBody.innerHTML = '';
+      const pre = document.createElement('div');
+      pre.className = 'viewer-note';
+      pre.textContent = data.text || '(This note is empty.)';
+      viewerBody.appendChild(pre);
+    } else if ((file.kind === 'audio' || file.kind === 'voicenote') && file.fileUrl) {
+      viewerBody.innerHTML = '';
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.className = 'viewer-audio';
+      audio.src = file.fileUrl;
+      viewerBody.appendChild(audio);
+    } else if (file.kind === 'video' && file.fileUrl) {
+      viewerBody.innerHTML = '';
+      const video = document.createElement('video');
+      video.controls = true;
+      video.className = 'viewer-video';
+      video.src = file.fileUrl;
+      viewerBody.appendChild(video);
+    } else if (file.extension === 'pdf' && file.fileUrl) {
+      viewerBody.innerHTML = '';
+      const frame = document.createElement('iframe');
+      frame.className = 'viewer-frame';
+      frame.src = file.fileUrl;
+      viewerBody.appendChild(frame);
+    } else {
+      viewerBody.innerHTML = '';
+      const box = document.createElement('div');
+      box.className = 'viewer-fallback';
+      const key = iconKeyFor(file);
+      box.innerHTML = `<svg viewBox="0 0 24 24" width="52" height="52" aria-hidden="true">${ICONS[key]}</svg>`;
+      const p = document.createElement('p');
+      p.textContent = file.fileUrl
+        ? 'Tap the arrow above to open this file.'
+        : 'There is nothing to show for this one.';
+      box.appendChild(p);
+      viewerBody.appendChild(box);
+    }
+  } catch (err) {
+    console.error(err);
+    viewerBody.innerHTML = '<div class="viewer-fallback"><p>Could not open this one.</p></div>';
+  }
+}
 
 /* ---------- uploading ---------- */
 
@@ -289,7 +540,6 @@ function makeTransferRow(name, size) {
   row.querySelector('.transfer-name').textContent = size ? `${name} · ${formatSize(size)}` : name;
   transfers.appendChild(row);
   return {
-    row,
     setProgress(fraction) {
       row.querySelector('.transfer-bar').style.width = Math.round(fraction * 100) + '%';
       row.querySelector('.transfer-status').textContent = Math.round(fraction * 100) + '%';
@@ -312,17 +562,20 @@ function makeTransferRow(name, size) {
   };
 }
 
-async function uploadViaServer(file, isVoiceNote, ui) {
+async function uploadViaServer(file, { isVoiceNote, tags, description }, ui) {
   ui.setStatus('Sending...');
   const form = new FormData();
   form.append('file', file, file.name);
   if (isVoiceNote) form.append('isVoiceNote', 'true');
+  if (description) form.append('description', description);
+  (tags || []).forEach((t) => form.append('tags', t));
   const res = await fetch('/api/upload', { method: 'POST', body: form });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Upload failed');
 }
 
-async function uploadOne(file, { isVoiceNote = false } = {}) {
+async function uploadOne(file, details = {}) {
+  const { isVoiceNote = false, tags = [], description = '' } = details;
   const ui = makeTransferRow(file.name, file.size);
   updateEmptyState(grid.children.length, memoryList.children.length);
 
@@ -338,10 +591,10 @@ async function uploadOne(file, { isVoiceNote = false } = {}) {
         await putWithProgress(presign.url, presign.headers, file, ui.setProgress);
       } catch (directErr) {
         // Storage would not take it straight from the phone; go via the server.
-        await uploadViaServer(file, isVoiceNote, ui);
+        await uploadViaServer(file, { isVoiceNote, tags, description }, ui);
         ui.done();
         showToast(`Saved ${file.name}`);
-        loadRecent();
+        refresh();
         return;
       }
 
@@ -351,11 +604,13 @@ async function uploadOne(file, { isVoiceNote = false } = {}) {
         filename: file.name,
         mimeType: file.type,
         isVoiceNote,
+        tags,
+        description,
       });
 
       ui.done();
       showToast(`Saved ${file.name}`);
-      loadRecent();
+      refresh();
     } catch (err) {
       console.error('Upload failed', err);
       ui.fail('Not sent', attempt);
@@ -366,10 +621,38 @@ async function uploadOne(file, { isVoiceNote = false } = {}) {
   await attempt();
 }
 
+/* ---------- details asked before a file is sent ---------- */
+
+let pendingFiles = [];
+let pendingIsVoice = false;
+
+function askForDetails(files, { isVoiceNote = false } = {}) {
+  pendingFiles = files;
+  pendingIsVoice = isVoiceNote;
+  document.getElementById('details-description').value = '';
+  detailsPicker.reset();
+  document.getElementById('details-subject').textContent = files.length === 1
+    ? files[0].name
+    : `${files.length} files`;
+  showSheet('details');
+}
+
+function sendPendingFiles(withDetails) {
+  const description = withDetails ? document.getElementById('details-description').value.trim() : '';
+  const tags = withDetails ? detailsPicker.getTags() : [];
+  const files = pendingFiles;
+  pendingFiles = [];
+  closeSheet();
+  files.forEach((file) => uploadOne(file, { isVoiceNote: pendingIsVoice, tags, description }));
+}
+
+document.getElementById('details-save').addEventListener('click', () => sendPendingFiles(true));
+document.getElementById('details-skip').addEventListener('click', () => sendPendingFiles(false));
+
 function handlePickedFiles(input) {
   const files = Array.from(input.files || []);
   input.value = '';
-  files.forEach((file) => uploadOne(file));
+  if (files.length) askForDetails(files);
 }
 
 document.getElementById('file-input').addEventListener('change', (e) => handlePickedFiles(e.target));
@@ -400,20 +683,28 @@ wireSaveButton('note-save', async () => {
   const title = document.getElementById('note-title');
   const body = document.getElementById('note-body');
   if (!body.value.trim()) throw new Error('Write something first');
-  await postJson('/api/notes', { title: title.value, text: body.value });
+  await postJson('/api/notes', {
+    title: title.value, text: body.value, tags: notePicker.getTags(),
+  });
   title.value = '';
   body.value = '';
+  notePicker.reset();
   showToast('Note saved');
-  loadRecent();
+  refresh();
 });
 
 wireSaveButton('link-save', async () => {
   const url = document.getElementById('link-url');
+  const description = document.getElementById('link-description');
   if (!url.value.trim()) throw new Error('Paste a link first');
-  await postJson('/api/links', { url: url.value });
+  await postJson('/api/links', {
+    url: url.value, description: description.value, tags: linkPicker.getTags(),
+  });
   url.value = '';
+  description.value = '';
+  linkPicker.reset();
   showToast('Link saved');
-  loadRecent();
+  refresh();
 });
 
 wireSaveButton('memory-save', async () => {
@@ -510,14 +801,16 @@ voiceSave.addEventListener('click', () => {
   const stamp = new Date().toLocaleString(undefined, {
     day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
   }).replace(/[,:]/g, '').replace(/\s+/g, '-');
-  const file = new File([recordedBlob], `Voice-${stamp}.${ext}`, { type: recordedBlob.type });
+  const blob = recordedBlob;
+  const file = new File([blob], `Voice-${stamp}.${ext}`, { type: blob.type });
+  recordedBlob = null;
   closeSheet();
-  uploadOne(file, { isVoiceNote: true });
+  setTimeout(() => askForDetails([file], { isVoiceNote: true }), 200);
 });
 
 /* ---------- start ---------- */
 
-loadRecent();
+refresh();
 
 // iOS Safari has no install prompt event, so show a manual one-time tip.
 (function iosInstallTip() {

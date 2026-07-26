@@ -16,12 +16,23 @@ function fail(res, err, message) {
   res.status(500).json({ error: message });
 }
 
+function parseTags(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') return raw.split(',');
+  return [];
+}
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.get('/api/files', async (req, res) => {
+  const tagId = (req.query.tag || '').toString().trim();
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
-    res.json({ files: await fabric.listRecent(folderId) });
+    const [files, tags] = await Promise.all([
+      tagId ? fabric.listByTag(folderId, tagId) : fabric.listRecent(folderId),
+      fabric.listFolderTags(folderId).catch(() => []),
+    ]);
+    res.json({ files, tags });
   } catch (err) {
     fail(res, err, 'Could not load your files');
   }
@@ -29,16 +40,29 @@ app.get('/api/files', async (req, res) => {
 
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').toString().trim();
-  if (!q) return res.json({ files: [], memories: [] });
+  const tagId = (req.query.tag || '').toString().trim();
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
+    if (!q) {
+      const files = tagId ? await fabric.listByTag(folderId, tagId) : await fabric.listRecent(folderId);
+      return res.json({ files, memories: [] });
+    }
     const [files, memories] = await Promise.all([
-      fabric.search(q, folderId),
+      fabric.search(q, folderId, tagId),
       fabric.searchMemories(q).catch(() => []),
     ]);
     res.json({ files, memories });
   } catch (err) {
     fail(res, err, 'Search did not work');
+  }
+});
+
+app.get('/api/notes/:id/content', async (req, res) => {
+  try {
+    const text = await fabric.getNoteContent(req.params.id);
+    res.json({ text: typeof text === 'string' ? text : '' });
+  } catch (err) {
+    fail(res, err, 'Could not open that note');
   }
 });
 
@@ -55,7 +79,7 @@ app.post('/api/upload/presign', async (req, res) => {
 });
 
 app.post('/api/upload/commit', async (req, res) => {
-  const { path: storagePath, filename, mimeType, isVoiceNote } = req.body || {};
+  const { path: storagePath, filename, mimeType, isVoiceNote, tags, description } = req.body || {};
   if (!storagePath || !filename) return res.status(400).json({ error: 'Missing upload details' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
@@ -65,6 +89,8 @@ app.post('/api/upload/commit', async (req, res) => {
       mimeType,
       parentId: folderId,
       isVoiceNote: !!isVoiceNote,
+      tags: parseTags(tags),
+      description,
     });
     res.status(201).json({ file });
   } catch (err) {
@@ -83,6 +109,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       mimeType: req.file.mimetype,
       parentId: folderId,
       isVoiceNote: req.body.isVoiceNote === 'true',
+      tags: parseTags(req.body.tags),
+      description: req.body.description,
     });
     res.status(201).json({ file });
   } catch (err) {
@@ -91,12 +119,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/notes', async (req, res) => {
-  const { title, text } = req.body || {};
+  const { title, text, tags, description } = req.body || {};
   if (!text || !text.trim()) return res.status(400).json({ error: 'Write something first' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
     const name = (title || '').trim() || text.trim().split('\n')[0].slice(0, 60);
-    const note = await fabric.createNote({ name, text, parentId: folderId });
+    const note = await fabric.createNote({
+      name, text, parentId: folderId, tags: parseTags(tags), description,
+    });
     res.status(201).json({ file: note });
   } catch (err) {
     fail(res, err, 'Could not save the note');
@@ -104,15 +134,17 @@ app.post('/api/notes', async (req, res) => {
 });
 
 app.post('/api/links', async (req, res) => {
-  let { url } = req.body || {};
-  url = (url || '').trim();
+  const { tags, description } = req.body || {};
+  let url = ((req.body || {}).url || '').trim();
   if (!/^https?:\/\/\S+$/i.test(url)) {
     url = /^\S+\.\S+/.test(url) ? `https://${url}` : '';
   }
   if (!url) return res.status(400).json({ error: 'That does not look like a link' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
-    const bookmark = await fabric.createBookmark({ url, parentId: folderId });
+    const bookmark = await fabric.createBookmark({
+      url, parentId: folderId, tags: parseTags(tags), description,
+    });
     res.status(201).json({ file: bookmark });
   } catch (err) {
     fail(res, err, 'Could not save the link');

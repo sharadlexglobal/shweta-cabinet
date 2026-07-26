@@ -35,6 +35,8 @@
     <input id="search-input" type="search" placeholder="Search your files..." autocomplete="off" />
   </div>
 
+  <div id="tag-bar" class="tag-bar hidden"></div>
+
   <main id="content">
     <div id="transfers" class="transfers"></div>
 
@@ -120,12 +122,47 @@
   <button class="sheet-cancel" data-close>Cancel</button>
 </div>
 
+<!-- Details asked for before anything is saved -->
+<div id="details-sheet" class="sheet hidden" role="dialog" aria-label="Add details">
+  <div class="sheet-handle"></div>
+  <h2 class="sheet-title" id="details-title">Add details</h2>
+  <p class="sheet-note" id="details-subject"></p>
+  <input id="details-description" class="field" type="text" placeholder="What is this? (optional)" />
+  <label class="field-label">Labels (optional)</label>
+  <div id="details-chosen" class="chip-row"></div>
+  <input id="details-tag-input" class="field" type="text" placeholder="Type a label and press enter" autocomplete="off" />
+  <div id="details-suggestions" class="chip-row chip-row-quiet"></div>
+  <div class="sheet-actions">
+    <button class="btn btn-quiet" id="details-skip">Skip</button>
+    <button id="details-save" class="btn btn-primary">Save</button>
+  </div>
+</div>
+
+<!-- Full view of one saved thing -->
+<div id="viewer" class="viewer hidden" role="dialog" aria-label="Viewing">
+  <div class="viewer-bar">
+    <button id="viewer-close" class="viewer-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <span id="viewer-name" class="viewer-name"></span>
+    <a id="viewer-download" class="viewer-download" href="#" target="_blank" rel="noopener" aria-label="Open original">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M12 4v11M12 15l-4-4M12 15l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </a>
+  </div>
+  <div id="viewer-body" class="viewer-body"></div>
+  <div id="viewer-meta" class="viewer-meta"></div>
+</div>
+
 <!-- Write a note -->
 <div id="note-sheet" class="sheet hidden" role="dialog" aria-label="Write a note">
   <div class="sheet-handle"></div>
   <h2 class="sheet-title">Write a note</h2>
   <input id="note-title" class="field" type="text" placeholder="Title (optional)" />
-  <textarea id="note-body" class="field field-area" rows="7" placeholder="Type here..."></textarea>
+  <textarea id="note-body" class="field field-area" rows="6" placeholder="Type here..."></textarea>
+  <label class="field-label">Labels (optional)</label>
+  <div id="note-chosen" class="chip-row"></div>
+  <input id="note-tag-input" class="field" type="text" placeholder="Type a label and press enter" autocomplete="off" />
+  <div id="note-suggestions" class="chip-row chip-row-quiet"></div>
   <div class="sheet-actions">
     <button class="btn btn-quiet" data-close>Cancel</button>
     <button id="note-save" class="btn btn-primary">Save note</button>
@@ -137,6 +174,11 @@
   <div class="sheet-handle"></div>
   <h2 class="sheet-title">Save a link</h2>
   <input id="link-url" class="field" type="url" inputmode="url" placeholder="https://..." autocomplete="off" />
+  <input id="link-description" class="field" type="text" placeholder="What is this link? (optional)" />
+  <label class="field-label">Labels (optional)</label>
+  <div id="link-chosen" class="chip-row"></div>
+  <input id="link-tag-input" class="field" type="text" placeholder="Type a label and press enter" autocomplete="off" />
+  <div id="link-suggestions" class="chip-row chip-row-quiet"></div>
   <div class="sheet-actions">
     <button class="btn btn-quiet" data-close>Cancel</button>
     <button id="link-save" class="btn btn-primary">Save link</button>
