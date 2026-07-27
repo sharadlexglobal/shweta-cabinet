@@ -789,7 +789,7 @@ async function uploadOne(file, details = {}) {
       }
 
       ui.setStatus('Saving...');
-      await postJson('/api/upload/commit', {
+      const saved = await postJson('/api/upload/commit', {
         path: presign.path,
         filename: file.name,
         mimeType: file.type,
@@ -799,7 +799,9 @@ async function uploadOne(file, details = {}) {
       });
 
       ui.done();
-      showToast(`Saved ${file.name}`);
+      showToast(saved.file && saved.file.descriptionSaved === false
+        ? `Saved ${file.name}, but your note about it did not stick`
+        : `Saved ${file.name}`);
       refresh();
     } catch (err) {
       console.error('Upload failed', err);
@@ -898,23 +900,44 @@ wireSaveButton('link-save', async () => {
   const url = document.getElementById('link-url');
   const description = document.getElementById('link-description');
   if (!url.value.trim()) throw new Error('Paste a link first');
-  await postJson('/api/links', {
+  const saved = await postJson('/api/links', {
     url: url.value, description: description.value, tags: linkPicker.getTags(),
   });
   url.value = '';
   description.value = '';
   linkPicker.reset();
-  showToast('Link saved');
+  showToast(saved.file && saved.file.descriptionSaved === false
+    ? 'Link saved, but your note about it did not stick'
+    : 'Link saved');
   refresh();
 });
 
 wireSaveButton('memory-save', async () => {
   const body = document.getElementById('memory-body');
   if (body.value.trim().length < 5) throw new Error('Write a little more to remember it');
-  await postJson('/api/memories', { text: body.value });
+  const { job } = await postJson('/api/memories', { text: body.value });
   body.value = '';
-  showToast('I will remember that. Search for it any time.');
+  // Fabric files a memory away before it can be searched for, so say so rather
+  // than promising something she would then fail to find.
+  showToast('Saved. It takes a few minutes before you can search for it.');
+  if (job && job.id) watchMemory(job.id);
 });
+
+// Quietly checks back until the memory is ready, then says so if she is still here.
+async function watchMemory(jobId) {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 30000));
+    try {
+      const { ready } = await (await fetch(`/api/memories/${jobId}`)).json();
+      if (ready) {
+        showToast('That memory is ready to search for now.');
+        return;
+      }
+    } catch (err) {
+      return;
+    }
+  }
+}
 
 /* ---------- voice recording ---------- */
 
@@ -1106,5 +1129,14 @@ refresh();
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+
+  // A new version takes over as soon as it is ready. Reloading once here means
+  // she is never left running old code against a newer cabinet.
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloading) return;
+    reloading = true;
+    location.reload();
   });
 }

@@ -61,16 +61,20 @@ function tagPayload(tags) {
 
 // Descriptions are not accepted while creating a resource, so they are applied
 // straight afterwards. A failure here must not lose the thing she just saved.
+// Returns false when the words did not stick, so she can be told rather than
+// left believing they were saved. The file itself is never lost either way.
 async function applyDescription(resourceId, description) {
-  const text = (description || '').trim();
-  if (!text) return;
+  const text = (typeof description === 'string' ? description : '').trim();
+  if (!text) return true;
   try {
     await fabricFetch(`/v2/resources/${resourceId}`, {
       method: 'PATCH',
       body: JSON.stringify({ description: text.slice(0, 2000) }),
     });
+    return true;
   } catch (err) {
-    console.error('Could not attach the description', err);
+    console.error('Could not attach the description', err && err.message);
+    return false;
   }
 }
 
@@ -117,7 +121,7 @@ async function registerFile({ path, filename, mimeType, parentId, isVoiceNote, t
       ...(isVoiceNote ? { metadata: { voiceNote: true } } : {}),
     }),
   });
-  await applyDescription(file.id, description);
+  file.descriptionSaved = await applyDescription(file.id, description);
   return file;
 }
 
@@ -164,7 +168,7 @@ async function createNote({ name, text, parentId, tags, description }) {
       ...(tagPayload(tags) ? { tags: tagPayload(tags) } : {}),
     }),
   });
-  await applyDescription(note.id, description);
+  note.descriptionSaved = await applyDescription(note.id, description);
   return note;
 }
 
@@ -181,7 +185,7 @@ async function createBookmark({ url, parentId, tags, description }) {
       ...(tagPayload(tags) ? { tags: tagPayload(tags) } : {}),
     }),
   });
-  await applyDescription(bookmark.id, description);
+  bookmark.descriptionSaved = await applyDescription(bookmark.id, description);
   return bookmark;
 }
 
@@ -196,6 +200,19 @@ async function createMemory({ name, content }) {
     method: 'POST',
     body: JSON.stringify({ source: 'text', content, name: stamped.slice(0, 255) }),
   });
+}
+
+// A memory is filed away in two steps: the job finishes, and only later is the
+// memory indexed. It cannot be searched for until both are done.
+async function memoryReady(jobId) {
+  const job = await fabricFetch(`/v2/memories/jobs/${assertId(jobId)}`);
+  if (job.status !== 'completed') return false;
+  const created = ((job.memories || {}).created) || [];
+  if (!created.length) return false;
+  const states = await Promise.all(
+    created.map((id) => fabricFetch(`/v2/memories/${id}`).then((m) => !!m.indexed).catch(() => false))
+  );
+  return states.every(Boolean);
 }
 
 // Memory search hands back every memory every time, with the near-misses
@@ -224,20 +241,39 @@ async function searchMemories(query) {
 
 /* ---------- listing, tags, search ---------- */
 
-async function listRecent(parentId, limit = 100) {
-  const data = await fabricFetch('/v2/resources/filter', {
-    method: 'POST',
-    body: JSON.stringify({ parentId }),
-  });
-  const resources = data.resources || [];
-  resources.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  return resources.slice(0, limit);
+// Fabric answers a filter with one page at a time — twenty by default — and
+// hands back a cursor for the next one. Asking once would quietly hide
+// everything past the first page, so we walk the pages until they run out.
+const PAGE_SIZE = 100;
+const NEWEST_FIRST = { property: 'createdAt', direction: 'DESC' };
+
+async function listPages(filter, cap) {
+  const collected = [];
+  let cursor = null;
+  do {
+    const page = await fabricFetch('/v2/resources/filter', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...filter,
+        limit: PAGE_SIZE,
+        order: NEWEST_FIRST,
+        ...(cursor ? { cursor } : {}),
+      }),
+    });
+    collected.push(...(page.resources || []));
+    cursor = page.hasMore ? page.nextCursor : null;
+  } while (cursor && collected.length < cap);
+  return collected.slice(0, cap);
+}
+
+async function listRecent(parentId, limit = 1000) {
+  return listPages({ parentId }, limit);
 }
 
 // Only the tags actually used inside this folder. The workspace-wide tag list
 // would expose names from other people's work, which must never show up here.
 async function listFolderTags(parentId) {
-  const resources = await listRecent(parentId, 500);
+  const resources = await listRecent(parentId, 2000);
   const seen = new Map();
   for (const r of resources) {
     for (const tag of r.tags || []) {
@@ -247,14 +283,8 @@ async function listFolderTags(parentId) {
   return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function listByTag(parentId, tagId) {
-  const data = await fabricFetch('/v2/resources/filter', {
-    method: 'POST',
-    body: JSON.stringify({ parentId, tagIds: [tagId] }),
-  });
-  const resources = data.resources || [];
-  resources.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  return resources;
+async function listByTag(parentId, tagId, limit = 1000) {
+  return listPages({ parentId, tagIds: [tagId] }, limit);
 }
 
 async function getResource(resourceId) {
@@ -298,15 +328,13 @@ async function search(query, parentId, tagId) {
       method: 'POST',
       body: JSON.stringify({ text: query, filters }),
     }).catch(() => ({ hits: [] })),
-    fabricFetch('/v2/resources/filter', {
-      method: 'POST',
-      body: JSON.stringify({ parentId, name: query, ...(tagId ? { tagIds: [tagId] } : {}) }),
-    }).catch(() => ({ resources: [] })),
+    listPages({ parentId, name: query, ...(tagId ? { tagIds: [tagId] } : {}) }, 200)
+      .catch(() => []),
   ]);
 
   const merged = new Map();
   for (const r of semantic.hits || []) merged.set(r.id, r);
-  for (const r of byName.resources || []) merged.set(r.id, r);
+  for (const r of byName) merged.set(r.id, r);
   return Array.from(merged.values());
 }
 
@@ -319,6 +347,7 @@ module.exports = {
   getNoteContent,
   createBookmark,
   createMemory,
+  memoryReady,
   searchMemories,
   listRecent,
   listFolderTags,

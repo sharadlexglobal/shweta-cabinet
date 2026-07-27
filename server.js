@@ -206,6 +206,14 @@ app.post('/api/memories', async (req, res) => {
   }
 });
 
+app.get('/api/memories/:jobId', async (req, res) => {
+  try {
+    res.json({ ready: await fabric.memoryReady(req.params.jobId) });
+  } catch (err) {
+    fail(res, err, 'Could not check that memory');
+  }
+});
+
 // Last line of defence: one malformed request must never take the cabinet down.
 app.use((err, req, res, next) => {
   console.error('Unhandled request error', err && err.message);
