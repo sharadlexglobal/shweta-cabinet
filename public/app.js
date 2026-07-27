@@ -37,7 +37,9 @@ function showToast(msg, action) {
 }
 
 function formatDate(iso) {
-  return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 function hostOf(url) {
@@ -96,10 +98,31 @@ function showSheet(name) {
   scrim.classList.add('open');
 }
 
+// Whatever was half-typed belongs to the moment she backed out of, not to the
+// next thing she saves.
+function clearSheetFields(sheet) {
+  if (sheet === sheets.note) {
+    document.getElementById('note-title').value = '';
+    document.getElementById('note-body').value = '';
+    notePicker.reset();
+  } else if (sheet === sheets.link) {
+    document.getElementById('link-url').value = '';
+    document.getElementById('link-description').value = '';
+    linkPicker.reset();
+  } else if (sheet === sheets.memory) {
+    document.getElementById('memory-body').value = '';
+  } else if (sheet === sheets.details && pendingFiles.length) {
+    const dropped = pendingFiles.length;
+    pendingFiles = [];
+    showToast(dropped === 1 ? 'That file was not saved' : `Those ${dropped} files were not saved`);
+  }
+}
+
 function closeSheet() {
   if (!openSheet) return;
   const sheet = openSheet;
   openSheet = null;
+  clearSheetFields(sheet);
   clearTimeout(sheetTimer);
   sheet.classList.remove('open');
   scrim.classList.remove('open');
@@ -386,6 +409,7 @@ let latestRequest = 0;
 async function refresh() {
   const q = searchInput.value.trim();
   const ticket = ++latestRequest;
+  let slowNotice;
   try {
     const params = new URLSearchParams();
     if (q) params.set('q', q);
@@ -393,7 +417,7 @@ async function refresh() {
     const url = q ? `/api/search?${params}` : `/api/files${params.toString() ? '?' + params : ''}`;
 
     // The free server naps, so the first call of the day can take a while.
-    const slowNotice = setTimeout(() => {
+    slowNotice = setTimeout(() => {
       if (ticket === latestRequest) busy.classList.remove('hidden');
     }, 400);
 
@@ -414,6 +438,7 @@ async function refresh() {
     renderMemories(data.memories || []);
     updateEmptyState((data.files || []).length, (data.memories || []).length);
   } catch (err) {
+    clearTimeout(slowNotice);
     if (ticket !== latestRequest) return;
     busy.classList.add('hidden');
     console.error(err);
@@ -484,7 +509,10 @@ document.getElementById('confirm-remove').addEventListener('click', async () => 
   }
 });
 
+let viewerTicket = 0;
+
 async function openViewer(file) {
+  const ticket = ++viewerTicket;
   viewingFile = file;
   viewerConfirm.classList.add('hidden');
   viewerName.textContent = displayName(file);
@@ -549,6 +577,8 @@ async function openViewer(file) {
       viewerBody.appendChild(img);
     } else if (file.kind === 'notepad') {
       const data = await (await fetch(`/api/notes/${file.id}/content`)).json();
+      // She may have closed this and opened something else while it loaded.
+      if (ticket !== viewerTicket) return;
       viewerBody.innerHTML = '';
       const pre = document.createElement('div');
       pre.className = 'viewer-note';
@@ -588,6 +618,7 @@ async function openViewer(file) {
       viewerBody.appendChild(box);
     }
   } catch (err) {
+    if (ticket !== viewerTicket) return;
     console.error(err);
     viewerBody.innerHTML = '<div class="viewer-fallback"><p>Could not open this one.</p></div>';
   }
@@ -612,6 +643,9 @@ function putWithProgress(url, headers, file, onProgress) {
       ? resolve()
       : reject(new Error('Storage refused the file (' + xhr.status + ')')));
     xhr.onerror = () => reject(new Error('Connection dropped'));
+    // Without this a stalled upload would sit at the same percentage for ever
+    // instead of failing and offering to try again.
+    xhr.timeout = 5 * 60 * 1000;
     xhr.ontimeout = () => reject(new Error('It took too long'));
     xhr.send(file);
   });
@@ -640,10 +674,19 @@ function makeTransferRow(name, size) {
     fail(message, onRetry) {
       row.classList.add('failed');
       row.querySelector('.transfer-status').textContent = message;
+      const old = row.querySelector('.transfer-retry');
+      if (old) old.remove();
       const retry = document.createElement('button');
       retry.className = 'transfer-retry';
       retry.textContent = 'Try again';
-      retry.addEventListener('click', () => { row.remove(); onRetry(); });
+      retry.addEventListener('click', () => {
+        // Reuse this row rather than removing it, so a second failure still has
+        // somewhere to report itself instead of disappearing without a word.
+        retry.remove();
+        row.classList.remove('failed');
+        row.querySelector('.transfer-bar').style.width = '0%';
+        onRetry();
+      });
       row.appendChild(retry);
     },
     done() {
@@ -717,23 +760,34 @@ let pendingFiles = [];
 let pendingIsVoice = false;
 
 function askForDetails(files, { isVoiceNote = false } = {}) {
-  pendingFiles = files;
-  pendingIsVoice = isVoiceNote;
   document.getElementById('details-description').value = '';
   detailsPicker.reset();
   document.getElementById('details-subject').textContent = files.length === 1
     ? files[0].name
     : `${files.length} files`;
   showSheet('details');
+  // Set after opening: showSheet closes whatever was open, which clears pending.
+  pendingFiles = files;
+  pendingIsVoice = isVoiceNote;
 }
 
-function sendPendingFiles(withDetails) {
+async function sendPendingFiles(withDetails) {
   const description = withDetails ? document.getElementById('details-description').value.trim() : '';
   const tags = withDetails ? detailsPicker.getTags() : [];
   const files = pendingFiles;
+  const isVoiceNote = pendingIsVoice;
   pendingFiles = [];
   closeSheet();
-  files.forEach((file) => uploadOne(file, { isVoiceNote: pendingIsVoice, tags, description }));
+
+  // Three at a time: a whole camera roll sent at once just makes every one of
+  // them crawl and time out on a phone connection.
+  const queue = [...files];
+  const worker = async () => {
+    while (queue.length) {
+      await uploadOne(queue.shift(), { isVoiceNote, tags, description });
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
 }
 
 document.getElementById('details-save').addEventListener('click', () => sendPendingFiles(true));
@@ -814,10 +868,19 @@ const voiceHint = document.getElementById('voice-hint');
 const voiceSave = document.getElementById('voice-save');
 
 let recorder = null;
+let activeStream = null;
 let recordedChunks = [];
 let recordedBlob = null;
 let recordTimer = null;
 let recordStartedAt = 0;
+
+// The microphone stays switched on until its tracks are stopped, so this must
+// run on every exit from recording, including when she simply backs out.
+function releaseMic() {
+  if (!activeStream) return;
+  activeStream.getTracks().forEach((t) => t.stop());
+  activeStream = null;
+}
 
 function tickTimer() {
   const seconds = Math.floor((Date.now() - recordStartedAt) / 1000);
@@ -870,11 +933,12 @@ async function startRecording() {
     // the finished audio only arrives afterwards and still needs this handle.
     const rec = makeRecorder(stream);
     recorder = rec;
+    activeStream = stream;
     recordedChunks = [];
     recordedBlob = null;
 
     const finish = () => {
-      stream.getTracks().forEach((t) => t.stop());
+      releaseMic();
       if (!recordedChunks.length) {
         voiceHint.textContent = 'Nothing was recorded. Please try once more.';
         voiceTimer.textContent = 'Tap to start';
@@ -888,6 +952,12 @@ async function startRecording() {
     rec.ondataavailable = (e) => { if (e.data && e.data.size) recordedChunks.push(e.data); };
     rec.onstop = finish;
     rec.onerror = () => {
+      clearInterval(recordTimer);
+      recordTimer = null;
+      recorder = null;
+      releaseMic();
+      setRecordingUi(false);
+      voiceTimer.textContent = 'Tap to start';
       voiceHint.textContent = 'The recording stopped unexpectedly. Please try again.';
     };
 
@@ -908,6 +978,7 @@ async function startRecording() {
 
 function stopRecording(discard = false) {
   clearInterval(recordTimer);
+  recordTimer = null;
   setRecordingUi(false);
   const rec = recorder;
   recorder = null;
@@ -915,6 +986,7 @@ function stopRecording(discard = false) {
     if (discard) rec.onstop = null;
     try { rec.stop(); } catch (err) { /* already stopped */ }
   }
+  if (discard) releaseMic();
   if (discard) {
     recordedChunks = [];
     recordedBlob = null;

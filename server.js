@@ -11,15 +11,27 @@ const FOLDER_NAME = process.env.FABRIC_FOLDER_NAME || 'Shweta';
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
+// A rejected request must never be reported as a server fault, and a caller
+// sending the wrong sort of value must never be able to stop the app.
+const REFUSALS = ['does not belong', 'not a valid item id', 'was not removed', 'not started here'];
+
 function fail(res, err, message) {
-  console.error(message, err);
+  const reason = (err && err.message) || '';
+  if (REFUSALS.some((r) => reason.toLowerCase().includes(r))) {
+    return res.status(400).json({ error: 'That is not something this cabinet can open' });
+  }
+  console.error(message, reason);
   res.status(500).json({ error: message });
 }
 
+// Anything from the network may be a number, an object or missing entirely.
+function asText(value, max = 5000) {
+  return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
 function parseTags(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw === 'string') return raw.split(',');
-  return [];
+  const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? raw.split(',') : []);
+  return list.filter((t) => typeof t === 'string').slice(0, 12);
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
@@ -59,7 +71,8 @@ app.get('/api/search', async (req, res) => {
 
 app.get('/api/notes/:id/content', async (req, res) => {
   try {
-    const text = await fabric.getNoteContent(req.params.id);
+    const folderId = await fabric.ensureFolder(FOLDER_NAME);
+    const text = await fabric.getNoteContent(req.params.id, folderId);
     res.json({ text: typeof text === 'string' ? text : '' });
   } catch (err) {
     fail(res, err, 'Could not open that note');
@@ -69,28 +82,31 @@ app.get('/api/notes/:id/content', async (req, res) => {
 // The browser sends bytes straight to storage, so it asks us for a signed link
 // first and tells us to register the file once the bytes have landed.
 app.post('/api/upload/presign', async (req, res) => {
-  const { filename, size } = req.body || {};
+  const filename = asText((req.body || {}).filename, 255).replace(/[/\\]/g, '_');
+  const size = Number((req.body || {}).size);
   if (!filename) return res.status(400).json({ error: 'Missing file name' });
   try {
-    res.json(await fabric.presignUpload(filename, Number(size)));
+    res.json(await fabric.presignUpload(filename, Number.isFinite(size) ? size : undefined));
   } catch (err) {
     fail(res, err, 'Could not start the upload');
   }
 });
 
 app.post('/api/upload/commit', async (req, res) => {
-  const { path: storagePath, filename, mimeType, isVoiceNote, tags, description } = req.body || {};
+  const { isVoiceNote, tags } = req.body || {};
+  const storagePath = asText((req.body || {}).path, 500);
+  const filename = asText((req.body || {}).filename, 255).replace(/[/\\]/g, '_');
   if (!storagePath || !filename) return res.status(400).json({ error: 'Missing upload details' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
     const file = await fabric.registerFile({
       path: storagePath,
       filename,
-      mimeType,
+      mimeType: asText((req.body || {}).mimeType, 200),
       parentId: folderId,
       isVoiceNote: !!isVoiceNote,
       tags: parseTags(tags),
-      description,
+      description: asText((req.body || {}).description, 2000),
     });
     res.status(201).json({ file });
   } catch (err) {
@@ -119,13 +135,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/notes', async (req, res) => {
-  const { title, text, tags, description } = req.body || {};
-  if (!text || !text.trim()) return res.status(400).json({ error: 'Write something first' });
+  const { title, tags, description } = req.body || {};
+  const text = asText((req.body || {}).text, 200000);
+  if (!text) return res.status(400).json({ error: 'Write something first' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
-    const name = (title || '').trim() || text.trim().split('\n')[0].slice(0, 60);
+    const name = asText(title, 200) || text.split('\n')[0].slice(0, 60);
     const note = await fabric.createNote({
-      name, text, parentId: folderId, tags: parseTags(tags), description,
+      name, text, parentId: folderId, tags: parseTags(tags), description: asText(description, 2000),
     });
     res.status(201).json({ file: note });
   } catch (err) {
@@ -135,15 +152,15 @@ app.post('/api/notes', async (req, res) => {
 
 app.post('/api/links', async (req, res) => {
   const { tags, description } = req.body || {};
-  let url = ((req.body || {}).url || '').trim();
+  let url = asText((req.body || {}).url, 2000);
   if (!/^https?:\/\/\S+$/i.test(url)) {
-    url = /^\S+\.\S+/.test(url) ? `https://${url}` : '';
+    url = /^\S+\.\S+$/.test(url) ? `https://${url}` : '';
   }
   if (!url) return res.status(400).json({ error: 'That does not look like a link' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
     const bookmark = await fabric.createBookmark({
-      url, parentId: folderId, tags: parseTags(tags), description,
+      url, parentId: folderId, tags: parseTags(tags), description: asText(description, 2000),
     });
     res.status(201).json({ file: bookmark });
   } catch (err) {
@@ -154,7 +171,7 @@ app.post('/api/links', async (req, res) => {
 // Removal only ever moves the item to Fabric's trash, so "Undo" can bring it
 // straight back and nothing is lost to a mistaken tap.
 app.post('/api/delete', async (req, res) => {
-  const { id } = req.body || {};
+  const id = asText((req.body || {}).id, 100);
   if (!id) return res.status(400).json({ error: 'Nothing to remove' });
   try {
     const folderId = await fabric.ensureFolder(FOLDER_NAME);
@@ -166,7 +183,7 @@ app.post('/api/delete', async (req, res) => {
 });
 
 app.post('/api/restore', async (req, res) => {
-  const { id } = req.body || {};
+  const id = asText((req.body || {}).id, 100);
   if (!id) return res.status(400).json({ error: 'Nothing to bring back' });
   try {
     await fabric.restoreResource(id);
@@ -177,16 +194,27 @@ app.post('/api/restore', async (req, res) => {
 });
 
 app.post('/api/memories', async (req, res) => {
-  const { text, title } = req.body || {};
-  if (!text || text.trim().length < 5) {
+  const text = asText((req.body || {}).text, 20000);
+  if (text.length < 5) {
     return res.status(400).json({ error: 'Write a little more to remember it' });
   }
   try {
-    const job = await fabric.createMemory({ name: (title || '').trim() || null, content: text.trim() });
+    const job = await fabric.createMemory({ name: asText((req.body || {}).title, 200), content: text });
     res.status(201).json({ job });
   } catch (err) {
     fail(res, err, 'Could not remember that');
   }
+});
+
+// Last line of defence: one malformed request must never take the cabinet down.
+app.use((err, req, res, next) => {
+  console.error('Unhandled request error', err && err.message);
+  if (res.headersSent) return next(err);
+  res.status(400).json({ error: 'That request could not be understood' });
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection', err && err.message);
 });
 
 const port = process.env.PORT || 3000;

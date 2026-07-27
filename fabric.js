@@ -81,19 +81,31 @@ async function applyDescription(resourceId, description) {
 // shape of the path we're given before trusting it.
 const STORAGE_PATH = /^workspace\/[0-9a-f-]{36}\/resource\/[0-9a-f-]{36}\/v0\/[^/]+$/i;
 
+// Paths we handed out, so a caller cannot ask us to attach somebody else's
+// stored file to this cabinet by naming their storage path instead.
+const issuedPaths = new Map();
+const PATH_VALID_FOR = 30 * 60 * 1000;
+
+function rememberPath(path) {
+  issuedPaths.set(path, Date.now());
+  for (const [key, at] of issuedPaths) {
+    if (Date.now() - at > PATH_VALID_FOR) issuedPaths.delete(key);
+  }
+}
+
 async function presignUpload(filename, size) {
   const query = new URLSearchParams({ filename });
   if (Number.isFinite(size)) query.set('size', String(size));
   const presign = await fabricFetch(`/v2/upload?${query}`);
-  return {
-    url: presign.url,
-    headers: presign.headers,
-    path: new URL(presign.url).pathname.replace(/^\//, ''),
-  };
+  const path = new URL(presign.url).pathname.replace(/^\//, '');
+  rememberPath(path);
+  return { url: presign.url, headers: presign.headers, path };
 }
 
 async function registerFile({ path, filename, mimeType, parentId, isVoiceNote, tags, description }) {
   if (!STORAGE_PATH.test(path)) throw new Error('Unexpected storage path');
+  if (!issuedPaths.has(path)) throw new Error('That upload was not started here');
+  issuedPaths.delete(path);
   const file = await fabricFetch('/v2/files', {
     method: 'POST',
     body: JSON.stringify({
@@ -125,6 +137,25 @@ async function uploadFile({ buffer, filename, mimeType, parentId, isVoiceNote, t
 
 /* ---------- notes, links, memories ---------- */
 
+// Every id that reaches Fabric is checked here first. Without this a caller
+// could put path separators in an id and reach any endpoint of the workspace.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertId(resourceId) {
+  if (typeof resourceId !== 'string' || !UUID.test(resourceId)) {
+    throw new Error('Not a valid item id');
+  }
+  return resourceId;
+}
+
+async function assertInFolder(resourceId, parentId) {
+  const resource = await getResource(assertId(resourceId));
+  const belongsHere = (resource.parent && resource.parent.id === parentId)
+    || (resource.root && resource.root.id === parentId);
+  if (!belongsHere) throw new Error('That item does not belong to this cabinet');
+  return resource;
+}
+
 async function createNote({ name, text, parentId, tags, description }) {
   const note = await fabricFetch('/v2/notepads', {
     method: 'POST',
@@ -137,7 +168,8 @@ async function createNote({ name, text, parentId, tags, description }) {
   return note;
 }
 
-async function getNoteContent(resourceId) {
+async function getNoteContent(resourceId, parentId) {
+  await assertInFolder(resourceId, parentId);
   return fabricFetch(`/v2/notepads/${resourceId}/content`);
 }
 
@@ -153,10 +185,16 @@ async function createBookmark({ url, parentId, tags, description }) {
   return bookmark;
 }
 
+// Fabric keeps memories for the whole workspace with no folder to scope them
+// to, so each one saved here is stamped and only stamped ones are ever shown.
+// Without this, searching would surface the workspace owner's private memories.
+const MEMORY_STAMP = '[cabinet]';
+
 async function createMemory({ name, content }) {
+  const stamped = `${MEMORY_STAMP} ${(name || '').trim() || content.trim().slice(0, 50)}`;
   return fabricFetch('/v2/memories', {
     method: 'POST',
-    body: JSON.stringify({ source: 'text', content, ...(name ? { name } : {}) }),
+    body: JSON.stringify({ source: 'text', content, name: stamped.slice(0, 255) }),
   });
 }
 
@@ -167,15 +205,21 @@ const MEMORY_MATCH_FLOOR = 15;
 
 async function searchMemories(query) {
   const data = await fabricFetch(`/v2/memories/search?query=${encodeURIComponent(query)}`);
-  const hits = data.hits || [];
-  if (!hits.length) return [];
+  const ours = (data.hits || []).filter(
+    (h) => typeof h.name === 'string' && h.name.startsWith(MEMORY_STAMP)
+  );
+  if (!ours.length) return [];
 
-  const lowest = Math.min(...hits.map((h) => h.score || 0));
-  return hits.filter((h) => {
-    const score = h.score || 0;
-    if (score < MEMORY_MATCH_FLOOR) return false;
-    return hits.length === 1 || score >= lowest * 1.5;
-  });
+  let lowest = Infinity;
+  for (const h of ours) lowest = Math.min(lowest, h.score || 0);
+
+  return ours
+    .filter((h) => {
+      const score = h.score || 0;
+      if (score < MEMORY_MATCH_FLOOR) return false;
+      return ours.length === 1 || score >= lowest * 1.5;
+    })
+    .map((h) => ({ ...h, name: h.name.slice(MEMORY_STAMP.length).trim() }));
 }
 
 /* ---------- listing, tags, search ---------- */
@@ -220,23 +264,29 @@ async function getResource(resourceId) {
 // Always archive rather than erase: Fabric deletes for good by default, and a
 // tap in this app must never be the last word on somebody's document.
 async function removeResource(resourceId, parentId) {
-  const resource = await getResource(resourceId);
-  const belongsHere = (resource.parent && resource.parent.id === parentId)
-    || (resource.root && resource.root.id === parentId);
-  if (!belongsHere) throw new Error('That item does not belong to this cabinet');
-
+  const resource = await assertInFolder(resourceId, parentId);
   await fabricFetch('/v2/resources/delete', {
     method: 'POST',
     body: JSON.stringify({ resourceIds: [resourceId], archive: true }),
   });
+  archivedHere.add(resourceId);
   return resource;
 }
 
+// Only things this app archived may be brought back. An archived item cannot be
+// re-checked against the folder, so the record of having removed it is the gate.
+const archivedHere = new Set();
+
 async function restoreResource(resourceId) {
+  assertId(resourceId);
+  if (!archivedHere.has(resourceId)) {
+    throw new Error('That item was not removed from this cabinet');
+  }
   await fabricFetch('/v2/resources/recover', {
     method: 'POST',
     body: JSON.stringify({ resourceIds: [resourceId] }),
   });
+  archivedHere.delete(resourceId);
 }
 
 async function search(query, parentId, tagId) {
