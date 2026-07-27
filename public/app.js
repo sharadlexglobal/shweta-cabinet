@@ -8,6 +8,7 @@ const memorySection = document.getElementById('memory-results');
 const memoryList = document.getElementById('memory-list');
 const tagBar = document.getElementById('tag-bar');
 const busy = document.getElementById('busy');
+const loadError = document.getElementById('load-error');
 
 let knownTags = [];
 let activeTagId = null;
@@ -33,7 +34,8 @@ function showToast(msg, action) {
   }
   toast.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.add('hidden'), action ? 7000 : 3000);
+  // Undo is the only way back from a mistaken delete, so it waits much longer.
+  toastTimer = setTimeout(() => toast.classList.add('hidden'), action ? 15000 : 3000);
 }
 
 function formatDate(iso) {
@@ -85,17 +87,47 @@ const sheets = {
 let openSheet = null;
 let sheetTimer = null;
 
+/* ---------- the phone's own Back button ---------- */
+
+// Opening a sheet or the viewer adds one step to the phone's history, so Back
+// closes that and nothing else. Without this, Back walks out of the whole app.
+let overlayPushed = false;
+
+function anyOverlayOpen() {
+  return !!openSheet || !document.getElementById('viewer').classList.contains('hidden');
+}
+
+function pushOverlayStep() {
+  if (overlayPushed) return;
+  overlayPushed = true;
+  history.pushState({ cabinetOverlay: true }, '');
+}
+
+function dropOverlayStep() {
+  if (!overlayPushed) return;
+  overlayPushed = false;
+  history.back();
+}
+
+window.addEventListener('popstate', () => {
+  overlayPushed = false;
+  if (!document.getElementById('viewer').classList.contains('hidden')) closeViewer(true);
+  else if (openSheet) closeSheet(true);
+});
+
 function showSheet(name) {
-  closeSheet();
+  closeSheet(true); // swapping one sheet for another is not a new history step
   // A close still finishing its slide must not hide the sheet we are opening.
   clearTimeout(sheetTimer);
   const sheet = sheets[name];
   openSheet = sheet;
   sheet.classList.remove('hidden');
   scrim.classList.remove('hidden');
+  document.body.classList.add('locked');
   void sheet.offsetHeight; // settle the starting position so the slide animates
   sheet.classList.add('open');
   scrim.classList.add('open');
+  pushOverlayStep();
 }
 
 // Whatever was half-typed belongs to the moment she backed out of, not to the
@@ -118,7 +150,7 @@ function clearSheetFields(sheet) {
   }
 }
 
-function closeSheet() {
+function closeSheet(fromHistory = false) {
   if (!openSheet) return;
   const sheet = openSheet;
   openSheet = null;
@@ -132,9 +164,11 @@ function closeSheet() {
     scrim.classList.add('hidden');
   }, 240);
   stopRecording(true);
+  if (!anyOverlayOpen()) document.body.classList.remove('locked');
+  if (!fromHistory && !anyOverlayOpen()) dropOverlayStep();
 }
 
-scrim.addEventListener('click', closeSheet);
+scrim.addEventListener('click', () => closeSheet());
 document.addEventListener('click', (e) => {
   if (e.target.closest('[data-close]')) closeSheet();
 });
@@ -143,6 +177,8 @@ document.addEventListener('keydown', (e) => {
   if (!document.getElementById('viewer').classList.contains('hidden')) closeViewer();
   else closeSheet();
 });
+
+window.addEventListener('pagehide', () => releaseMic());
 
 document.getElementById('add-fab').addEventListener('click', () => showSheet('add'));
 
@@ -254,9 +290,13 @@ const linkPicker = createTagPicker(
 /* ---------- the label bar under search ---------- */
 
 function renderTagBar() {
+  // Rebuilding the row resets how far it was scrolled, which would push the
+  // label she just tapped off the side of the screen.
+  const scrolledTo = tagBar.scrollLeft;
   tagBar.innerHTML = '';
   tagBar.classList.toggle('hidden', knownTags.length === 0);
   if (!knownTags.length) return;
+  requestAnimationFrame(() => { tagBar.scrollLeft = scrolledTo; });
 
   const all = document.createElement('button');
   all.type = 'button';
@@ -425,6 +465,7 @@ async function refresh() {
     clearTimeout(slowNotice);
     if (ticket !== latestRequest) return;
     busy.classList.add('hidden');
+    loadError.classList.add('hidden');
     if (data.error) throw new Error(data.error);
 
     if (Array.isArray(data.tags)) {
@@ -442,9 +483,16 @@ async function refresh() {
     if (ticket !== latestRequest) return;
     busy.classList.add('hidden');
     console.error(err);
-    showToast('Could not load. Please try again.');
+    // A three second message is no use with no signal and no way to reload,
+    // so the way back in stays on screen until it works.
+    grid.innerHTML = '';
+    renderMemories([]);
+    emptyState.classList.add('hidden');
+    loadError.classList.remove('hidden');
   }
 }
+
+document.getElementById('load-retry').addEventListener('click', refresh);
 
 let searchDebounce;
 searchInput.addEventListener('input', () => {
@@ -463,15 +511,16 @@ const viewerDownload = document.getElementById('viewer-download');
 const viewerConfirm = document.getElementById('viewer-confirm');
 let viewingFile = null;
 
-function closeViewer() {
+function closeViewer(fromHistory = false) {
   viewer.classList.add('hidden');
   viewerBody.innerHTML = '';
   viewerConfirm.classList.add('hidden');
   viewingFile = null;
-  document.body.classList.remove('locked');
+  if (!anyOverlayOpen()) document.body.classList.remove('locked');
+  if (!fromHistory && !anyOverlayOpen()) dropOverlayStep();
 }
 
-document.getElementById('viewer-close').addEventListener('click', closeViewer);
+document.getElementById('viewer-close').addEventListener('click', () => closeViewer());
 
 document.getElementById('viewer-delete').addEventListener('click', () => {
   viewerConfirm.classList.remove('hidden');
@@ -519,16 +568,24 @@ async function openViewer(file) {
   viewerBody.innerHTML = '<div class="viewer-loading">Opening...</div>';
   viewer.classList.remove('hidden');
   document.body.classList.add('locked');
+  pushOverlayStep();
 
   const openTarget = file.kind === 'bookmark' ? file.originUrl : file.fileUrl;
   viewerDownload.classList.toggle('hidden', !openTarget);
   if (openTarget) viewerDownload.href = openTarget;
 
+  viewerMeta.innerHTML = '';
+  // The bar at the top clips long names, so the whole name lives down here.
+  const fullName = document.createElement('div');
+  fullName.className = 'viewer-fullname';
+  fullName.textContent = displayName(file);
+  viewerMeta.appendChild(fullName);
+
   const bits = [];
   if (file.description) bits.push(file.description);
   if (file.size) bits.push(formatSize(file.size));
-  bits.push(formatDate(file.createdAt));
-  viewerMeta.innerHTML = '';
+  const when = formatDate(file.createdAt);
+  if (when) bits.push(when);
   const line = document.createElement('div');
   line.className = 'viewer-meta-line';
   line.textContent = bits.join(' · ');

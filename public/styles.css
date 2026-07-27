@@ -173,6 +173,9 @@ html, body {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  /* Camera file names have no spaces to break at, so allow a break anywhere. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .file-meta {
@@ -400,15 +403,18 @@ body.locked { overflow: hidden; }
 .viewer-link-go { display: inline-block; text-decoration: none; padding: 14px 26px; }
 
 .toast-action {
-  background: none;
-  border: none;
-  color: #F0B49B;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(240, 180, 155, 0.5);
+  border-radius: 10px;
+  color: #F5C3AC;
   font-family: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 700;
-  margin-left: 14px;
+  margin-left: 8px;
   cursor: pointer;
-  padding: 0;
+  padding: 9px 16px;
+  min-height: 40px;
+  flex-shrink: 0;
 }
 
 .viewer-loading, .viewer-fallback { text-align: center; color: var(--ink-soft); }
@@ -421,12 +427,33 @@ body.locked { overflow: hidden; }
   border-top: 1px solid var(--line);
 }
 
+.viewer-fullname {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .viewer-meta-line {
   font-size: 13px;
   color: var(--ink-soft);
   line-height: 1.5;
   margin-bottom: 8px;
 }
+
+.viewer-meta-line:empty { margin-bottom: 0; }
+
+.load-error {
+  text-align: center;
+  padding: 50px 20px;
+  color: var(--ink-soft);
+}
+
+.load-error-mark { color: var(--terracotta); margin-bottom: 12px; }
+.load-error p { margin: 4px 0; }
+.load-retry { margin-top: 18px; flex: none; padding: 14px 30px; }
 
 .viewer-meta .chip-row { margin-bottom: 0; }
 
@@ -569,8 +596,11 @@ body.locked { overflow: hidden; }
   box-shadow: 0 -10px 40px rgba(43, 36, 29, 0.18);
   transform: translateY(100%);
   transition: transform .24s cubic-bezier(.22,.7,.3,1);
+  /* dvh follows the space left after the keyboard opens; vh is the fallback. */
   max-height: 88vh;
+  max-height: 88dvh;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .sheet.open { transform: translateY(0); }
@@ -790,6 +820,7 @@ body.locked { overflow: hidden; }
 .upload-fab.busy svg { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Above the sheets and the viewer: a message she cannot see is no message. */
 .toast {
   position: fixed;
   left: 50%;
@@ -797,13 +828,17 @@ body.locked { overflow: hidden; }
   transform: translateX(-50%);
   background: var(--ink);
   color: #fff;
-  padding: 12px 20px;
+  padding: 12px 18px;
   border-radius: 12px;
   font-size: 13.5px;
-  box-shadow: var(--shadow);
-  z-index: 30;
-  max-width: 80vw;
+  box-shadow: 0 10px 30px rgba(43, 36, 29, 0.35);
+  z-index: 90;
+  max-width: 88vw;
   text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .install-tip {

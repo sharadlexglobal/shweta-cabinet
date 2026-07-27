@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 <title>Shweta's Cabinet</title>
 <meta name="theme-color" content="#FBF6EF" />
 <link rel="manifest" href="/manifest.webmanifest" />
@@ -45,6 +45,18 @@
       <h2 class="section-title">Things you asked me to remember</h2>
       <div id="memory-list"></div>
     </section>
+
+    <div id="load-error" class="load-error hidden">
+      <div class="load-error-mark">
+        <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true">
+          <path d="M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18Z" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M12 8v5M12 16.2v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <p>Could not reach your cabinet.</p>
+      <p class="empty-sub">Check your internet, then try again.</p>
+      <button id="load-retry" class="btn btn-primary load-retry">Try again</button>
+    </div>
 
     <div id="empty-state" class="empty-state hidden">
       <div class="empty-illustration">
