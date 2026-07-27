@@ -98,8 +98,13 @@ function rememberPath(path) {
 }
 
 async function presignUpload(filename, size) {
-  const query = new URLSearchParams({ filename });
-  if (Number.isFinite(size)) query.set('size', String(size));
+  // Fabric refuses the request outright if size is missing, and a phone does
+  // not always know how big a file is (anything picked from cloud storage), so
+  // an unknown size is sent as zero rather than left out.
+  const query = new URLSearchParams({
+    filename,
+    size: String(Number.isFinite(size) && size >= 0 ? size : 0),
+  });
   const presign = await fabricFetch(`/v2/upload?${query}`);
   const path = new URL(presign.url).pathname.replace(/^\//, '');
   rememberPath(path);
@@ -160,11 +165,26 @@ async function assertInFolder(resourceId, parentId) {
   return resource;
 }
 
+// Fabric treats a single line break as a soft wrap inside one paragraph, so a
+// shopping list typed on separate lines comes back as one run-on sentence. Each
+// line is stored as its own paragraph, and read back the way she typed it.
+function toParagraphs(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .join('\n\n');
+}
+
+function fromParagraphs(text) {
+  return String(text || '').replace(/\n{2,}/g, '\n');
+}
+
 async function createNote({ name, text, parentId, tags, description }) {
   const note = await fabricFetch('/v2/notepads', {
     method: 'POST',
     body: JSON.stringify({
-      name, parentId, text,
+      name, parentId, text: toParagraphs(text),
       ...(tagPayload(tags) ? { tags: tagPayload(tags) } : {}),
     }),
   });
@@ -174,7 +194,8 @@ async function createNote({ name, text, parentId, tags, description }) {
 
 async function getNoteContent(resourceId, parentId) {
   await assertInFolder(resourceId, parentId);
-  return fabricFetch(`/v2/notepads/${resourceId}/content`);
+  const text = await fabricFetch(`/v2/notepads/${resourceId}/content`);
+  return fromParagraphs(typeof text === 'string' ? text : '');
 }
 
 async function createBookmark({ url, parentId, tags, description }) {

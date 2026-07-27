@@ -154,7 +154,9 @@ app.post('/api/links', async (req, res) => {
   const { tags, description } = req.body || {};
   let url = asText((req.body || {}).url, 2000);
   if (!/^https?:\/\/\S+$/i.test(url)) {
-    url = /^\S+\.\S+$/.test(url) ? `https://${url}` : '';
+    // Only a bare address may have https:// put in front of it. Anything that
+    // already names a different scheme is refused rather than mangled.
+    url = /^\S+\.\S+$/.test(url) && !url.includes('://') ? `https://${url}` : '';
   }
   if (!url) return res.status(400).json({ error: 'That does not look like a link' });
   try {
